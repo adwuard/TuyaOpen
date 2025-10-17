@@ -49,10 +49,11 @@ config ENABLE_CHAT_DISPLAY
     endif
 
 config ENABLE_BMM150_SENSOR
-    bool "enable BMM150 magnetometer sensor"
-    default y
+    bool "enable BMM150 magnetometer sensor (DEPRECATED - use BNO08X instead)"
+    default n
     help
-        Enable BMM150 3-axis magnetometer for compass heading
+        Enable BMM150 3-axis magnetometer for compass heading.
+        DEPRECATED: This sensor has been replaced by BNO08X IMU.
 
 config ENABLE_GPS_LC76G
     bool "enable LC76G GPS module"
@@ -182,7 +183,7 @@ config ENABLE_CATTLE_TRACKER_UI
 
 config ENABLE_CELLULAR_SUPPORT
     bool "enable cellular support"
-    default y
+    default n
     select ENABLE_CELLULAR if ENABLE_CELLULAR_SUPPORT
     help
         Enable app hardware capability configuration including cellular network functionality.
@@ -209,6 +210,13 @@ config ENABLE_DEBUG_VIRTUAL_SIMULATION
     help
         Enable virtual simulation mode for debugging and testing purposes.
         Note: This should be disabled in production builds.
+
+config ENABLE_BNO08X_SENSOR
+    bool "enable BNO08x IMU sensor"
+    default y
+    help
+        Enable BNO08x IMU sensor for heading, pitch, and roll detection.
+        This sensor is used for compass heading and orientation tracking.
 
 endmenu
 

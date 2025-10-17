@@ -43,13 +43,18 @@
 #define GPS_I2C_SDA_PIN TUYA_GPIO_NUM_21
 #endif
 
-// BMM150 Magnetometer I2C Pins (I2C Port 2 - GPIO 14/15)
+// BMM150/BNO08x Magnetometer/IMU I2C Pins (I2C Port 2 - GPIO 14/15)
+// Note: BMM150 and BNO08x share the same I2C port (only one can be used at a time)
 #ifndef BMM150_I2C_SCL_PIN_NUM
 #define BMM150_I2C_SCL_PIN_NUM TUYA_GPIO_NUM_14
 #endif
 #ifndef BMM150_I2C_SDA_PIN_NUM
 #define BMM150_I2C_SDA_PIN_NUM TUYA_GPIO_NUM_15
 #endif
+
+// BNO08x uses the same I2C pins and port as BMM150
+#define BNO08X_I2C_SCL_PIN_NUM BMM150_I2C_SCL_PIN_NUM
+#define BNO08X_I2C_SDA_PIN_NUM BMM150_I2C_SDA_PIN_NUM
 
 // GPS UART Pins (UART Port 2 - GPIO 40/41) - Alternative to I2C
 #ifndef GPS_UART_TX_PIN
@@ -80,8 +85,9 @@ OPERATE_RET dev_i2c_write_nbytes(uint8_t addr, uint8_t *pdata, uint32_t len);
 OPERATE_RET dev_i2c_read_nbytes(uint8_t addr, uint8_t reg, uint8_t *pdata, uint32_t len);
 OPERATE_RET dev_i2c_read_only_nbytes(uint8_t addr, uint8_t *pdata, uint32_t len);
 
-// BMM150 I2C functions (uses I2C port 1 with GPIO 24/25)
-OPERATE_RET bmm150_i2c_port_init();
+// BMM150/BNO08x I2C functions (uses I2C Port 2 with GPIO 14/15)
+// Note: These functions can be used by both BMM150 and BNO08x drivers
+OPERATE_RET bmm150_i2c_port_init();  // Initializes I2C Port 2 for magnetometer/IMU
 OPERATE_RET bmm150_i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t value);
 OPERATE_RET bmm150_i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *buffer, uint8_t length);
 

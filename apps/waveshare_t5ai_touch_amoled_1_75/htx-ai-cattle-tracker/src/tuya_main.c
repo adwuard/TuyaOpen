@@ -58,7 +58,7 @@
 #include "app_battery.h"
 #endif
 
-#if defined(ENABLE_BMM150_SENSOR) && (ENABLE_BMM150_SENSOR == 1) || defined(ENABLE_GPS_LC76G) && (ENABLE_GPS_LC76G == 1)
+#if defined(ENABLE_BNO08X_SENSOR) && (ENABLE_BNO08X_SENSOR == 1) || defined(ENABLE_GPS_LC76G) && (ENABLE_GPS_LC76G == 1)
 #include "sensor_integration.h"
 #endif
 
@@ -483,13 +483,13 @@ void user_main(void)
 
     reset_netconfig_check();
 
-#if defined(ENABLE_BMM150_SENSOR) && (ENABLE_BMM150_SENSOR == 1)
-    PR_INFO("Initializing BMM150 sensor...");
-    ret = sensor_bmm150_init();
+#if defined(ENABLE_BNO08X_SENSOR) && (ENABLE_BNO08X_SENSOR == 1)
+    PR_INFO("Initializing BNO08x IMU sensor...");
+    ret = sensor_bno08x_init();
     if (ret != OPRT_OK) {
-        PR_ERR("BMM150 initialization failed: %d", ret);
+        PR_ERR("BNO08x initialization failed: %d", ret);
     } else {
-        PR_INFO("BMM150 sensor initialized successfully");
+        PR_INFO("BNO08x IMU sensor initialized successfully");
     }
 #endif
 
@@ -511,14 +511,14 @@ void user_main(void)
     }
 #endif
 
-#if defined(ENABLE_BMM150_SENSOR) && (ENABLE_BMM150_SENSOR == 1) || defined(ENABLE_GPS_LC76G) && (ENABLE_GPS_LC76G == 1)
+#if defined(ENABLE_BNO08X_SENSOR) && (ENABLE_BNO08X_SENSOR == 1) || defined(ENABLE_GPS_LC76G) && (ENABLE_GPS_LC76G == 1)
     PR_INFO("Starting sensor tasks...");
     ret = sensor_tasks_start();
     if (ret != OPRT_OK) {
         PR_ERR("Sensor tasks start failed: %d", ret);
     } else {
         PR_INFO("Sensor tasks started successfully");
-        PR_INFO("BMM150 and GPS readings will be printed to console");
+        PR_INFO("BNO08x and GPS readings will be printed to console");
     }
 #endif
 

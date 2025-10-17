@@ -32,7 +32,7 @@
  */
 
 #include "sensor_integration.h"
-#include "bmm150.h"
+#include "bno08x.h"
 #include "lc76g.h"
 #include "dev_config.h"
 
@@ -61,13 +61,19 @@
 /***********************************************************
 ************************macro define************************
 ***********************************************************/
-#define TASK_BMM150_PRIORITY     THREAD_PRIO_2
-#define TASK_BMM150_SIZE         4096
+#define TASK_BNO08X_PRIORITY     THREAD_PRIO_2
+#define TASK_BNO08X_SIZE         4096
 #define TASK_GPS_PRIORITY        THREAD_PRIO_2
 #define TASK_GPS_SIZE            4096
 #define TASK_ENCODER_PRIORITY    THREAD_PRIO_2
 #define TASK_ENCODER_SIZE        2048
 #define ENCODER_POLL_INTERVAL_MS 100 /* Poll encoder every 100ms */
+
+// BNO08x I2C Configuration - uses SAME I2C port and pins as BMM150 (Port 2, GPIO 14/15)
+#define BNO08X_I2C_PORT          TUYA_I2C_NUM_2  // Same as BMM150
+#define BNO08X_I2C_ADDR          BNO08X_DEFAULT_ADDRESS  // 0x4B (or 0x4A if ADR jumper closed)
+#define BNO08X_INT_PIN           -1  // Optional interrupt pin (-1 to disable)
+#define BNO08X_RST_PIN           -1  // Optional reset pin (-1 to disable)
 
 #ifdef ENABLE_ENCODER_INPUT
 #define ENCODER_STEPS_PER_ZOOM 2 /* Number of encoder steps per zoom level change */
@@ -81,17 +87,10 @@
 ***********************variable define**********************
 ***********************************************************/
 
-#ifdef ENABLE_BMM150_SENSOR
-static THREAD_HANDLE sg_bmm150_handle = NULL;
-static bmm150_dev_t g_bmm150_dev;
-static compass_recalibration_cb_t sg_recalibration_callback = NULL;
-
-// Heading deviation tracking for recalibration detection
-#define HEADING_DEVIATION_THRESHOLD 15.0f  // 15 degrees threshold
-#define HEADING_DEVIATION_WINDOW 10        // Check over 10 readings
-static float sg_heading_history[HEADING_DEVIATION_WINDOW] = {0};
-static int sg_heading_index = 0;
-static bool sg_heading_initialized = false;
+#ifdef ENABLE_BNO08X_SENSOR
+static THREAD_HANDLE sg_bno08x_handle = NULL;
+static bno08x_dev_t g_bno08x_dev;
+static compass_accuracy_cb_t sg_accuracy_callback = NULL;
 #endif
 
 #ifdef ENABLE_GPS_LC76G
@@ -165,164 +164,120 @@ MUTEX_HANDLE g_i2c_bus_mutex = NULL;
 //     return OPRT_OK;
 // }
 
-#ifdef ENABLE_BMM150_SENSOR
+#ifdef ENABLE_BNO08X_SENSOR
 
 /**
- * @brief Calculate heading deviation from recent history
+ * @brief BNO08x sensor reading task - simple rotation vector reading
+ * 
+ * Follows Arduino demo pattern: init -> enable rotation vector -> read yaw in loop
  */
-static float __calculate_heading_deviation(float current_heading)
-{
-    if (!sg_heading_initialized) {
-        return 0.0f;
-    }
-
-    float max_heading = sg_heading_history[0];
-    float min_heading = sg_heading_history[0];
-
-    for (int i = 1; i < HEADING_DEVIATION_WINDOW; i++) {
-        if (sg_heading_history[i] > max_heading)
-            max_heading = sg_heading_history[i];
-        if (sg_heading_history[i] < min_heading)
-            min_heading = sg_heading_history[i];
-    }
-
-    // Handle 360-degree wrap-around
-    float deviation = max_heading - min_heading;
-    if (deviation > 180.0f) {
-        deviation = 360.0f - deviation;
-    }
-
-    return deviation;
-}
-
-/**
- * @brief BMM150 sensor reading task with live calibration
- */
-static void __bmm150_task(void *param)
+static void __bno08x_task(void *param)
 {
     OPERATE_RET rt = OPRT_OK;
 
-    PR_INFO("[BMM150] Task started - initializing sensor...");
+    PR_INFO("[BNO08x] Task started - initializing sensor...");
 
-    // Initialize device structure
-    g_bmm150_dev.i2c_addr = BMM150_ADDRESS;
-
-    // Initialize I2C using BMM150's dev_config
-    rt = bmm150_i2c_init();
+    // Initialize BNO08x sensor (pinmux and I2C setup handled internally)
+    rt = bno08x_init(&g_bno08x_dev, BNO08X_I2C_PORT, BNO08X_I2C_ADDR, 
+                     BNO08X_INT_PIN, BNO08X_RST_PIN);
     if (rt != OPRT_OK) {
-        PR_ERR("[BMM150] Failed to initialize I2C (error: %d)", rt);
+        PR_ERR("[BNO08x] Failed to initialize sensor (error: %d)", rt);
         tal_thread_delete(NULL);
         return;
     }
 
-    // Initialize BMM150 sensor
-    rt = bmm150_init(&g_bmm150_dev, BMM150_ADDRESS);
+    PR_INFO("[BNO08x] Initialized successfully!");
+
+    // Enable rotation vector report at 10Hz (100ms interval)
+    rt = bno08x_enable_rotation_vector(&g_bno08x_dev, 100);
     if (rt != OPRT_OK) {
-        PR_ERR("[BMM150] Failed to initialize sensor (error: %d)", rt);
+        PR_ERR("[BNO08x] Failed to enable rotation vector (error: %d)", rt);
         tal_thread_delete(NULL);
         return;
     }
 
-    PR_INFO("[BMM150] Initialized successfully!");
+    PR_INFO("[BNO08x] Rotation vector enabled at 10 Hz");
 
-    // Initialize live calibration system (dynamic compensation)
-    rt = bmm150_live_cal_init(&g_bmm150_dev);
+    // Enable dynamic calibration for all sensors
+    rt = bno08x_set_calibration_config(&g_bno08x_dev, SH2_CAL_ACCEL | SH2_CAL_GYRO | SH2_CAL_MAG);
     if (rt != OPRT_OK) {
-        PR_ERR("[BMM150] Failed to initialize live calibration (error: %d)", rt);
-        tal_thread_delete(NULL);
-        return;
+        PR_WARN("[BNO08x] Failed to set calibration config (error: %d)", rt);
+    } else {
+        PR_INFO("[BNO08x] Dynamic calibration enabled");
     }
-    PR_INFO("[BMM150] Live calibration system initialized");
 
     // Update sensor status
     tal_mutex_lock(g_sensor_mutex);
-    g_sensor_data.bmm150_ready = true;
-    g_sensor_data.bmm150_cal_needed = false;
+    g_sensor_data.bno08x_ready = true;
     tal_mutex_unlock(g_sensor_mutex);
 
-    // Main reading loop with live calibration
-    uint32_t calibration_check_counter = 0;
+    // Main reading loop - simple pattern like Arduino demo
+    uint8_t last_accuracy = 0;
     while (1) {
-        // Read raw magnetometer data
-        // Note: bmm150_read_mag_data() already applies hardware compensation using factory trim values
-        rt = bmm150_read_mag_data(&g_bmm150_dev);
-        if (rt == OPRT_OK) {
-            // Update live calibration with current reading (tracks min/max for offset calculation)
-            bmm150_live_cal_update(&g_bmm150_dev);
-
-            // Apply live calibration offsets on top of hardware compensation
-            bmm150_mag_data_t calibrated_value;
-            bmm150_live_cal_apply_offsets(&g_bmm150_dev, &calibrated_value);
-
-            // Calculate heading from calibrated data
-            float xyHeading = atan2(calibrated_value.x, calibrated_value.y);
-            float heading = xyHeading;
-
-            // Normalize to 0-360 range
-            if (heading < 0)
-                heading += 2 * M_PI;
-            if (heading > 2 * M_PI)
-                heading -= 2 * M_PI;
-            float heading_degrees = heading * 180.0f / M_PI;
-
-            // Update heading history for deviation tracking
-            sg_heading_history[sg_heading_index] = heading_degrees;
-            sg_heading_index = (sg_heading_index + 1) % HEADING_DEVIATION_WINDOW;
-            if (sg_heading_index == 0) {
-                sg_heading_initialized = true;
-            }
-
-            // Calculate heading deviation
-            float heading_deviation = __calculate_heading_deviation(heading_degrees);
-
-            // Check for turbulence and calibration needs (every 10 readings)
-            calibration_check_counter++;
-            if (calibration_check_counter >= 10) {
-                calibration_check_counter = 0;
-
-                bool turbulence = bmm150_live_cal_detect_turbulence(&g_bmm150_dev);
-                uint8_t cal_status = bmm150_live_cal_get_status(&g_bmm150_dev);
-                bool cal_needed = (cal_status != 0) || (heading_deviation > HEADING_DEVIATION_THRESHOLD);
-
-                // Update calibration status
-                tal_mutex_lock(g_sensor_mutex);
-                g_sensor_data.bmm150_cal_needed = cal_needed;
-                tal_mutex_unlock(g_sensor_mutex);
-
-                // Trigger callback if recalibration is needed
-                if (cal_needed && sg_recalibration_callback != NULL) {
-                    sg_recalibration_callback(heading_deviation, turbulence);
-                    if (turbulence) {
-                        PR_WARN("[BMM150] Magnetic turbulence detected! Deviation: %.1f°", heading_deviation);
-                    } else if (heading_deviation > HEADING_DEVIATION_THRESHOLD) {
-                        PR_WARN("[BMM150] Large heading deviation detected! Deviation: %.1f°", heading_deviation);
-                    }
-                }
-            }
-
-            // Update global sensor data with calibrated values
-            tal_mutex_lock(g_sensor_mutex);
-            g_sensor_data.heading_degrees = heading_degrees;
-            g_sensor_data.mag_x = calibrated_value.x;
-            g_sensor_data.mag_y = calibrated_value.y;
-            g_sensor_data.mag_z = calibrated_value.z;
-            tal_mutex_unlock(g_sensor_mutex);
-
-#if defined(ENABLE_GUI_TRACKER) && (ENABLE_GUI_TRACKER == 1)
-            // Update tracker compass with real BMM150 heading data
-            tracker_update_compass_heading(heading_degrees);
-#endif
-
-            // Debug output (uncommented for testing)
-            // PR_DEBUG("[BMM150] Heading: %.1f°, Deviation: %.1f°, Cal: %s",
-            //          heading_degrees, heading_deviation,
-            //          g_sensor_data.bmm150_cal_needed ? "NEEDED" : "OK");
-
-        } else {
-            PR_ERR("[BMM150] Failed to read data (error: %d)", rt);
+        // Check if sensor was reset
+        if (bno08x_was_reset(&g_bno08x_dev)) {
+            PR_WARN("[BNO08x] Sensor reset detected - re-enabling rotation vector");
+            bno08x_enable_rotation_vector(&g_bno08x_dev, 100);
         }
 
-        tal_system_sleep(100); // Read at 10Hz
+        // Get sensor event (calls sh2_service internally - like Arduino)
+        if (bno08x_get_sensor_event(&g_bno08x_dev)) {
+            // Check if this is a rotation vector event
+            if (bno08x_get_sensor_event_id(&g_bno08x_dev) == BNO08X_ROTATION_VECTOR) {
+                // Get heading (yaw) in degrees (0-360) - like Arduino getYaw()
+                float heading_degrees = bno08x_get_yaw_degrees(&g_bno08x_dev);
+                float pitch_degrees = bno08x_get_pitch_degrees(&g_bno08x_dev);
+                float roll_degrees = bno08x_get_roll_degrees(&g_bno08x_dev);
+
+                // Get quaternion components
+                float quat_i = bno08x_get_quat_i(&g_bno08x_dev);
+                float quat_j = bno08x_get_quat_j(&g_bno08x_dev);
+                float quat_k = bno08x_get_quat_k(&g_bno08x_dev);
+                float quat_real = bno08x_get_quat_real(&g_bno08x_dev);
+
+                // Get accuracy status (BNO08x auto-calibrates)
+                uint8_t accuracy = bno08x_get_quat_accuracy(&g_bno08x_dev);
+
+                // Optional: notify about accuracy changes
+                if (accuracy != last_accuracy) {
+                    PR_INFO("[BNO08x] Accuracy changed: %d (%s)", accuracy,
+                            accuracy == 0 ? "Unreliable" :
+                            accuracy == 1 ? "Low" :
+                            accuracy == 2 ? "Medium" : "High");
+                    last_accuracy = accuracy;
+                    
+                    if (sg_accuracy_callback != NULL) {
+                        sg_accuracy_callback(accuracy);
+                    }
+                }
+
+                // Update global sensor data
+                tal_mutex_lock(g_sensor_mutex);
+                g_sensor_data.heading_degrees = heading_degrees;
+                g_sensor_data.pitch_degrees = pitch_degrees;
+                g_sensor_data.roll_degrees = roll_degrees;
+                g_sensor_data.quat_i = quat_i;
+                g_sensor_data.quat_j = quat_j;
+                g_sensor_data.quat_k = quat_k;
+                g_sensor_data.quat_real = quat_real;
+                g_sensor_data.quat_accuracy = accuracy;
+                tal_mutex_unlock(g_sensor_mutex);
+
+                PR_INFO("!!!!!!!!! BNO08x: heading=%.1f° pitch=%.1f° roll=%.1f° accuracy=%d", 
+                        heading_degrees, pitch_degrees, roll_degrees, accuracy);
+
+#if defined(ENABLE_GUI_TRACKER) && (ENABLE_GUI_TRACKER == 1)
+                // Update tracker compass with BNO08x heading data
+                tracker_update_compass_heading(heading_degrees);
+#endif
+
+                // Debug output (can be enabled for testing)
+                // PR_DEBUG("[BNO08x] Heading: %.1f°, Pitch: %.1f°, Roll: %.1f°, Acc: %d",
+                //          heading_degrees, pitch_degrees, roll_degrees, accuracy);
+            }
+        }
+
+        tal_system_sleep(10); // Fast loop like Arduino demo
     }
 }
 #endif
@@ -625,11 +580,11 @@ __attribute__((unused)) static void __gps_task(void *param)
 }
 #endif
 /**
- * @brief Initialize BMM150 magnetometer sensor
+ * @brief Initialize BNO08x IMU sensor
  */
-OPERATE_RET sensor_bmm150_init(void)
+OPERATE_RET sensor_bno08x_init(void)
 {
-    PR_INFO("[SENSOR] Initializing BMM150 magnetometer...");
+    PR_INFO("[SENSOR] Initializing BNO08x IMU sensor...");
 
     // Create mutex if not exists
     if (g_sensor_mutex == NULL) {
@@ -642,7 +597,7 @@ OPERATE_RET sensor_bmm150_init(void)
 
     // Note: System initialization (GPIO, buttons) is done by board_register_hardware()
     // in the main app, so we don't call dev_sys_init() here to avoid conflicts
-    PR_INFO("[SENSOR] BMM150 init ready (system already initialized by main app)");
+    PR_INFO("[SENSOR] BNO08x init ready (system already initialized by main app)");
 
     return OPRT_OK;
 }
@@ -720,17 +675,17 @@ OPERATE_RET sensor_tasks_start(void)
 #endif
 #endif
 
-// Start BMM150 task
-#ifdef ENABLE_BMM150_SENSOR
-    if (sg_bmm150_handle == NULL) {
-        static THREAD_CFG_T bmm150_param = {
-            .priority = TASK_BMM150_PRIORITY, .stackDepth = TASK_BMM150_SIZE, .thrdname = "bmm150"};
-        ret = tal_thread_create_and_start(&sg_bmm150_handle, NULL, NULL, __bmm150_task, NULL, &bmm150_param);
+// Start BNO08x task
+#ifdef ENABLE_BNO08X_SENSOR
+    if (sg_bno08x_handle == NULL) {
+        static THREAD_CFG_T bno08x_param = {
+            .priority = TASK_BNO08X_PRIORITY, .stackDepth = TASK_BNO08X_SIZE, .thrdname = "bno08x"};
+        ret = tal_thread_create_and_start(&sg_bno08x_handle, NULL, NULL, __bno08x_task, NULL, &bno08x_param);
         if (ret != OPRT_OK) {
-            PR_ERR("[SENSOR] Failed to create BMM150 task (error: %d)", ret);
+            PR_ERR("[SENSOR] Failed to create BNO08x task (error: %d)", ret);
             return ret;
         }
-        PR_INFO("[SENSOR] BMM150 task started");
+        PR_INFO("[SENSOR] BNO08x task started");
     }
 #endif
 
@@ -795,9 +750,10 @@ void sensor_print_readings(void)
     if (sensor_get_data(&data) == OPRT_OK) {
         PR_INFO("=== Sensor Readings ===");
 
-#ifdef ENABLE_BMM150_SENSOR
-        PR_INFO("BMM150: heading=%.1f° mag_x=%d mag_y=%d mag_z=%d ready=%d cal_needed=%d", data.heading_degrees,
-                data.mag_x, data.mag_y, data.mag_z, data.bmm150_ready, data.bmm150_cal_needed);
+#ifdef ENABLE_BNO08X_SENSOR
+        PR_INFO("BNO08x: heading=%.1f° pitch=%.1f° roll=%.1f° accuracy=%d ready=%d", 
+                data.heading_degrees, data.pitch_degrees, data.roll_degrees,
+                data.quat_accuracy, data.bno08x_ready);
 #endif
 
 #ifdef ENABLE_GPS_LC76G
@@ -813,16 +769,16 @@ void sensor_print_readings(void)
 }
 
 /**
- * @brief Register a callback for compass recalibration notifications
+ * @brief Register a callback for compass accuracy monitoring (optional)
  */
-OPERATE_RET sensor_bmm150_register_recalibration_cb(compass_recalibration_cb_t callback)
+OPERATE_RET sensor_bno08x_register_accuracy_cb(compass_accuracy_cb_t callback)
 {
-#ifdef ENABLE_BMM150_SENSOR
-    sg_recalibration_callback = callback;
-    PR_INFO("[SENSOR] Compass recalibration callback %s", callback ? "registered" : "unregistered");
+#ifdef ENABLE_BNO08X_SENSOR
+    sg_accuracy_callback = callback;
+    PR_INFO("[SENSOR] Compass accuracy callback %s", callback ? "registered" : "unregistered");
     return OPRT_OK;
 #else
-    PR_ERR("[SENSOR] BMM150 sensor not enabled");
+    PR_ERR("[SENSOR] BNO08x sensor not enabled");
     return OPRT_NOT_SUPPORTED;
 #endif
 }
