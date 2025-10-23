@@ -23,8 +23,8 @@ static void draw_compass(lv_obj_t *canvas, float heading)
     const int32_t tick_mid = 8;
     const int32_t tick_short = 4;
 
-    PR_DEBUG("draw_compass: canvas=466x466 (fixed), cx=%d, cy=%d, outer_r=%d, heading=%.1f", 
-             cx, cy, outer_r, heading);
+    // PR_DEBUG("draw_compass: canvas=466x466 (fixed), cx=%d, cy=%d, outer_r=%d, heading=%.1f", 
+            //  cx, cy, outer_r, heading);
 
     lv_layer_t layer;
     lv_canvas_init_layer(canvas, &layer);
@@ -41,15 +41,15 @@ static void draw_compass(lv_obj_t *canvas, float heading)
     arc_dsc.end_angle = 360;
     lv_draw_arc(&layer, &arc_dsc);
 
-    /* Ticks: every 3 degrees short, 30 degrees mid, 90 degrees long */
+    /* Ticks: draw every 10 degrees for balanced detail and performance */
     lv_draw_line_dsc_t line_dsc;
     lv_draw_line_dsc_init(&line_dsc);
     line_dsc.color = lv_color_hex(0xB0B0B0);
     line_dsc.width = 2;
-    for(int deg = 0; deg < 360; deg += 3){
+    for(int deg = 0; deg < 360; deg += 10){  /* Draw every 10 degrees (36 ticks) */
         int len = tick_short;
-        if(deg % 90 == 0) len = tick_long;
-        else if(deg % 30 == 0) len = tick_mid;
+        if(deg % 90 == 0) len = tick_long;      /* Long ticks for cardinal directions */
+        else if(deg % 30 == 0) len = tick_mid;  /* Medium ticks for 30° intervals */
 
         /* 0° at top, clockwise, with heading offset */
         float a = (float)(90 - deg + heading) * (float)M_PI / 180.0f;
@@ -66,8 +66,7 @@ static void draw_compass(lv_obj_t *canvas, float heading)
     /* Degree labels every 30 degrees (0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330) */
     lv_draw_label_dsc_t lbl_dsc;
     lv_draw_label_dsc_init(&lbl_dsc);
-    lbl_dsc.color = lv_color_hex(0xC8C8C8);
-    lbl_dsc.font = lv_theme_get_font_small(NULL);
+    lbl_dsc.color = lv_color_hex(0xC8C8C8);  /* Unified color for all labels */
     lbl_dsc.align = LV_TEXT_ALIGN_CENTER;
 
     /* Static text buffers for each degree label */
@@ -75,6 +74,13 @@ static void draw_compass(lv_obj_t *canvas, float heading)
     int text_idx = 0;
 
     for(int deg = 0; deg < 360; deg += 30){
+        /* Use larger font for cardinal directions (N/E/S/W) for emphasis */
+        if (deg % 90 == 0) {
+            lbl_dsc.font = &lv_font_montserrat_16;  /* Larger bold font for N/E/S/W */
+        } else {
+            lbl_dsc.font = &lv_font_montserrat_14;  /* Smaller font for degree numbers */
+        }
+        
         /* 0° at top, clockwise, with heading offset */
         float a = (float)(90 - deg + heading) * (float)M_PI / 180.0f;
         float s = sinf(a);
