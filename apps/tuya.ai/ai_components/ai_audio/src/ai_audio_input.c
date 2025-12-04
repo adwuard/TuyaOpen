@@ -24,6 +24,9 @@
 #include "tuya_ringbuf.h"
 
 #include "ai_audio.h"
+#include "ai_audio_input.h"
+#include <math.h>
+
 /***********************************************************
 ************************macro define************************
 ***********************************************************/
@@ -32,6 +35,10 @@
 
 #define ASR_PROCE_UNIT_NUM    30
 #define ASR_WAKEUP_TIMEOUT_MS (30000)
+
+// Audio power estimation
+#define AUDIO_POWER_BUFFER_SIZE   160
+#define AUDIO_POWER_NORMALIZATION 50000.0f
 /***********************************************************
 ***********************typedef define***********************
 ***********************************************************/
@@ -56,7 +63,16 @@ typedef struct {
     TUYA_RINGBUFF_T                ringbuff_hdl;
     MUTEX_HANDLE                   rb_mutex;
 
-    AI_AUDIO_INPUT_ASR_T           asr;  
+    AI_AUDIO_INPUT_ASR_T           asr;
+
+    // Audio power estimation
+    int16_t audio_power_buffer[AUDIO_POWER_BUFFER_SIZE];
+    float audio_power;
+    MUTEX_HANDLE audio_power_mutex;
+
+    // Audio input data callback
+    AI_AUDIO_INPUT_DATA_CB data_cb;
+    void *data_cb_user_data;
 
 } AI_AUDIO_INPUT_INFO_T;
 // clang-format on
@@ -91,6 +107,56 @@ static AI_AUDIO_INPUT_INFO_T sg_audio_input;
 /***********************************************************
 ***********************function define**********************
 ***********************************************************/
+/**
+ * @brief Calculate audio power from PCM samples
+ */
+static void __ai_audio_input_calculate_power(uint8_t *audio_data, uint32_t data_len)
+{
+    if (audio_data == NULL || data_len == 0) {
+        return;
+    }
+
+    uint32_t num_samples = data_len / 2; // 16-bit samples = 2 bytes per sample
+    if (num_samples > AUDIO_POWER_BUFFER_SIZE) {
+        num_samples = AUDIO_POWER_BUFFER_SIZE;
+    }
+
+    int16_t *pcm_samples = (int16_t *)audio_data;
+
+    // Update circular buffer
+    if (num_samples >= AUDIO_POWER_BUFFER_SIZE) {
+        memcpy(sg_audio_input.audio_power_buffer, pcm_samples, AUDIO_POWER_BUFFER_SIZE * sizeof(int16_t));
+    } else {
+        memmove(sg_audio_input.audio_power_buffer, &sg_audio_input.audio_power_buffer[num_samples],
+                (AUDIO_POWER_BUFFER_SIZE - num_samples) * sizeof(int16_t));
+        memcpy(&sg_audio_input.audio_power_buffer[AUDIO_POWER_BUFFER_SIZE - num_samples], pcm_samples,
+               num_samples * sizeof(int16_t));
+    }
+
+    // Calculate max absolute value
+    float max_value = 0.0f;
+    for (int i = 0; i < AUDIO_POWER_BUFFER_SIZE; i++) {
+        float abs_sample = fabsf((float)sg_audio_input.audio_power_buffer[i]);
+        if (abs_sample > max_value) {
+            max_value = abs_sample;
+        }
+    }
+
+    // Normalize
+    float normalized_power = max_value / AUDIO_POWER_NORMALIZATION;
+    if (normalized_power > 1.0f)
+        normalized_power = 1.0f;
+    if (normalized_power < 0.0f)
+        normalized_power = 0.0f;
+
+    // Update power with mutex protection
+    if (sg_audio_input.audio_power_mutex != NULL) {
+        tal_mutex_lock(sg_audio_input.audio_power_mutex);
+        sg_audio_input.audio_power = normalized_power;
+        tal_mutex_unlock(sg_audio_input.audio_power_mutex);
+    }
+}
+
 static void __ai_audio_asr_wakeup_timeout(TIMER_ID timer_id, void *arg)
 {
     PR_NOTICE("asr wakeup timeout");
@@ -386,6 +452,14 @@ static void __ai_audio_get_input_frame(TDL_AUDIO_FRAME_FORMAT_E type, TDL_AUDIO_
     tuya_ring_buff_write(sg_audio_input.ringbuff_hdl, data, len);
     tal_mutex_unlock(sg_audio_input.rb_mutex);
 
+    // Calculate and update audio power
+    __ai_audio_input_calculate_power(data, len);
+
+    // Call registered callback if available
+    if (sg_audio_input.data_cb != NULL) {
+        sg_audio_input.data_cb(data, len, sg_audio_input.data_cb_user_data);
+    }
+
     return;
 }
 
@@ -490,6 +564,15 @@ OPERATE_RET ai_audio_input_init(AI_AUDIO_INPUT_CFG_T *cfg, AI_AUDIO_INOUT_INFORM
     TUYA_CALL_ERR_RETURN(tuya_ring_buff_create(AI_AUDIO_VOICE_FRAME_LEN_GET(AI_AUDIO_INPUT_RB_TIME_MS) + 1,
                                                OVERFLOW_PSRAM_STOP_TYPE, &sg_audio_input.ringbuff_hdl));
     TUYA_CALL_ERR_RETURN(tal_mutex_create_init(&sg_audio_input.rb_mutex));
+
+    // Audio power mutex init
+    TUYA_CALL_ERR_RETURN(tal_mutex_create_init(&sg_audio_input.audio_power_mutex));
+
+    // Initialize audio power
+    sg_audio_input.audio_power = 0.0f;
+    memset(sg_audio_input.audio_power_buffer, 0, sizeof(sg_audio_input.audio_power_buffer));
+    sg_audio_input.data_cb = NULL;
+    sg_audio_input.data_cb_user_data = NULL;
 
     TUYA_CALL_ERR_RETURN(__ai_audio_input_set_method(cfg->get_valid_data_method));
 
@@ -627,4 +710,45 @@ void ai_audio_discard_input_data(uint32_t discard_size)
     tal_mutex_lock(sg_audio_input.rb_mutex);
     tuya_ring_buff_discard(sg_audio_input.ringbuff_hdl, discard_size);
     tal_mutex_unlock(sg_audio_input.rb_mutex);
+}
+
+OPERATE_RET ai_audio_input_register_data_cb(AI_AUDIO_INPUT_DATA_CB cb, void *user_data)
+{
+    if (sg_audio_input.rb_mutex == NULL) {
+        return OPRT_COM_ERROR;
+    }
+
+    tal_mutex_lock(sg_audio_input.rb_mutex);
+    sg_audio_input.data_cb = cb;
+    sg_audio_input.data_cb_user_data = user_data;
+    tal_mutex_unlock(sg_audio_input.rb_mutex);
+
+    return OPRT_OK;
+}
+
+OPERATE_RET ai_audio_input_unregister_data_cb(void)
+{
+    if (sg_audio_input.rb_mutex == NULL) {
+        return OPRT_COM_ERROR;
+    }
+
+    tal_mutex_lock(sg_audio_input.rb_mutex);
+    sg_audio_input.data_cb = NULL;
+    sg_audio_input.data_cb_user_data = NULL;
+    tal_mutex_unlock(sg_audio_input.rb_mutex);
+
+    return OPRT_OK;
+}
+
+float ai_audio_input_get_power(void)
+{
+    float power = 0.0f;
+
+    if (sg_audio_input.audio_power_mutex != NULL) {
+        tal_mutex_lock(sg_audio_input.audio_power_mutex);
+        power = sg_audio_input.audio_power;
+        tal_mutex_unlock(sg_audio_input.audio_power_mutex);
+    }
+
+    return power;
 }

@@ -22,6 +22,8 @@
 
 #include "minimp3_ex.h"
 #include "ai_audio.h"
+#include "ai_audio_player.h"
+#include <math.h>
 
 /***********************************************************
 ************************macro define************************
@@ -36,6 +38,10 @@
 
 #define MP3_PCM_SIZE_MAX           (MAX_NSAMP * MAX_NCHAN * MAX_NGRAN * 2)
 #define PLAYING_NO_DATA_TIMEOUT_MS (5 * 1000)
+
+// Audio power estimation
+#define AUDIO_POWER_BUFFER_SIZE   160
+#define AUDIO_POWER_NORMALIZATION 50000.0f
 
 #define AI_AUDIO_PLAYER_STAT_CHANGE(last_stat, new_stat)                                                               \
     do {                                                                                                               \
@@ -71,6 +77,15 @@ typedef struct {
     uint8_t *mp3_pcm; // mp3 decode to pcm buffer
 
     uint8_t is_first_play;
+
+    // Audio power estimation
+    int16_t audio_power_buffer[AUDIO_POWER_BUFFER_SIZE];
+    float audio_power;
+    MUTEX_HANDLE audio_power_mutex;
+
+    // Audio output callback
+    AI_AUDIO_PLAYER_OUTPUT_CB output_cb;
+    void *output_cb_user_data;
 } APP_PLAYER_T;
 
 /***********************************************************
@@ -85,6 +100,51 @@ static APP_PLAYER_T sg_player;
 /***********************************************************
 ***********************function define**********************
 ***********************************************************/
+/**
+ * @brief Calculate audio power from PCM samples
+ */
+static void __ai_audio_player_calculate_power(int16_t *pcm_data, uint32_t samples)
+{
+    if (pcm_data == NULL || samples == 0) {
+        return;
+    }
+
+    // Update circular buffer
+    uint32_t num_samples = (samples > AUDIO_POWER_BUFFER_SIZE) ? AUDIO_POWER_BUFFER_SIZE : samples;
+
+    if (num_samples >= AUDIO_POWER_BUFFER_SIZE) {
+        memcpy(sg_player.audio_power_buffer, pcm_data, AUDIO_POWER_BUFFER_SIZE * sizeof(int16_t));
+    } else {
+        memmove(sg_player.audio_power_buffer, &sg_player.audio_power_buffer[num_samples],
+                (AUDIO_POWER_BUFFER_SIZE - num_samples) * sizeof(int16_t));
+        memcpy(&sg_player.audio_power_buffer[AUDIO_POWER_BUFFER_SIZE - num_samples], pcm_data,
+               num_samples * sizeof(int16_t));
+    }
+
+    // Calculate max absolute value
+    float max_value = 0.0f;
+    for (int i = 0; i < AUDIO_POWER_BUFFER_SIZE; i++) {
+        float abs_sample = fabsf((float)sg_player.audio_power_buffer[i]);
+        if (abs_sample > max_value) {
+            max_value = abs_sample;
+        }
+    }
+
+    // Normalize
+    float normalized_power = max_value / AUDIO_POWER_NORMALIZATION;
+    if (normalized_power > 1.0f)
+        normalized_power = 1.0f;
+    if (normalized_power < 0.0f)
+        normalized_power = 0.0f;
+
+    // Update power with mutex protection
+    if (sg_player.audio_power_mutex != NULL) {
+        tal_mutex_lock(sg_player.audio_power_mutex);
+        sg_player.audio_power = normalized_power;
+        tal_mutex_unlock(sg_player.audio_power_mutex);
+    }
+}
+
 static OPERATE_RET __ai_audio_player_mp3_start(void)
 {
     OPERATE_RET rt = OPRT_OK;
@@ -154,6 +214,19 @@ static OPERATE_RET __ai_audio_player_mp3_playing(void)
     ctx->mp3_raw_head += ctx->mp3_frame_info.frame_bytes;
 
     if (samples) {
+        // Calculate total samples (samples is per-channel count, mp3_pcm contains interleaved samples)
+        uint32_t total_samples = samples * ctx->mp3_frame_info.channels;
+
+        // Calculate and update audio power
+        __ai_audio_player_calculate_power((int16_t *)ctx->mp3_pcm, total_samples);
+
+        // Call registered callback if available
+        if (ctx->output_cb != NULL) {
+            ctx->output_cb((int16_t *)ctx->mp3_pcm, total_samples, ctx->mp3_frame_info.channels,
+                           ctx->output_cb_user_data);
+        }
+
+        // Play audio
         tdl_audio_play(ctx->audio_hdl, ctx->mp3_pcm, samples * 2);
     }
 
@@ -233,7 +306,7 @@ static void __ai_audio_player_task(void *arg)
                 uint32_t cache_len = tuya_ring_buff_used_size_get(ctx->rb_hdl);
                 tal_mutex_unlock(ctx->spk_rb_mutex);
 
-                if (cache_len >= 10*1024 || tal_system_get_millisecond() - start_time > 2000) {
+                if (cache_len >= 10 * 1024 || tal_system_get_millisecond() - start_time > 2000) {
                     ctx->is_first_play = 0;
                 }
                 break;
@@ -329,6 +402,15 @@ OPERATE_RET ai_audio_player_init(void)
     // ring buffer mutex init
     TUYA_CALL_ERR_GOTO(tal_mutex_create_init(&sg_player.spk_rb_mutex), __ERR);
 
+    // audio power mutex init
+    TUYA_CALL_ERR_GOTO(tal_mutex_create_init(&sg_player.audio_power_mutex), __ERR);
+
+    // Initialize audio power
+    sg_player.audio_power = 0.0f;
+    memset(sg_player.audio_power_buffer, 0, sizeof(sg_player.audio_power_buffer));
+    sg_player.output_cb = NULL;
+    sg_player.output_cb_user_data = NULL;
+
     // thread init
     TUYA_CALL_ERR_GOTO(
         tkl_thread_create(&sg_player.thrd_hdl, "ai_player", 1024 * 4, THREAD_PRIO_0, __ai_audio_player_task, NULL),
@@ -352,6 +434,11 @@ __ERR:
     if (sg_player.spk_rb_mutex) {
         tal_mutex_release(sg_player.spk_rb_mutex);
         sg_player.spk_rb_mutex = NULL;
+    }
+
+    if (sg_player.audio_power_mutex) {
+        tal_mutex_release(sg_player.audio_power_mutex);
+        sg_player.audio_power_mutex = NULL;
     }
 
     if (sg_player.rb_hdl) {
@@ -546,4 +633,45 @@ OPERATE_RET ai_audio_player_stop(void)
 uint8_t ai_audio_player_is_playing(void)
 {
     return sg_player.is_playing;
+}
+
+OPERATE_RET ai_audio_player_register_output_cb(AI_AUDIO_PLAYER_OUTPUT_CB cb, void *user_data)
+{
+    if (sg_player.mutex == NULL) {
+        return OPRT_COM_ERROR;
+    }
+
+    tal_mutex_lock(sg_player.mutex);
+    sg_player.output_cb = cb;
+    sg_player.output_cb_user_data = user_data;
+    tal_mutex_unlock(sg_player.mutex);
+
+    return OPRT_OK;
+}
+
+OPERATE_RET ai_audio_player_unregister_output_cb(void)
+{
+    if (sg_player.mutex == NULL) {
+        return OPRT_COM_ERROR;
+    }
+
+    tal_mutex_lock(sg_player.mutex);
+    sg_player.output_cb = NULL;
+    sg_player.output_cb_user_data = NULL;
+    tal_mutex_unlock(sg_player.mutex);
+
+    return OPRT_OK;
+}
+
+float ai_audio_player_get_power(void)
+{
+    float power = 0.0f;
+
+    if (sg_player.audio_power_mutex != NULL) {
+        tal_mutex_lock(sg_player.audio_power_mutex);
+        power = sg_player.audio_power;
+        tal_mutex_unlock(sg_player.audio_power_mutex);
+    }
+
+    return power;
 }

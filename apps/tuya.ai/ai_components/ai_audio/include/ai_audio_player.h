@@ -36,6 +36,15 @@ typedef enum {
     AI_AUDIO_PLAYER_STAT_MAX,
 } AI_AUDIO_PLAYER_STATE_E;
 
+/**
+ * @brief Callback type for audio output data
+ * @param pcm_data Pointer to PCM audio data (int16_t samples)
+ * @param samples Number of samples (not bytes)
+ * @param channels Number of audio channels
+ * @param user_data User-provided context
+ */
+typedef void (*AI_AUDIO_PLAYER_OUTPUT_CB)(int16_t *pcm_data, uint32_t samples, uint8_t channels, void *user_data);
+
 /***********************************************************
 ********************function declaration********************
 ***********************************************************/
@@ -86,6 +95,26 @@ OPERATE_RET ai_audio_player_stop(void);
  * @return uint8_t - Returns 1 if the player is playing, 0 otherwise.
  */
 uint8_t ai_audio_player_is_playing(void);
+
+/**
+ * @brief Register a callback for audio output data
+ * @param cb Callback function to receive audio output data
+ * @param user_data User-provided context passed to callback
+ * @return OPERATE_RET - OPRT_OK on success
+ */
+OPERATE_RET ai_audio_player_register_output_cb(AI_AUDIO_PLAYER_OUTPUT_CB cb, void *user_data);
+
+/**
+ * @brief Unregister the audio output callback
+ * @return OPERATE_RET - OPRT_OK on success
+ */
+OPERATE_RET ai_audio_player_unregister_output_cb(void);
+
+/**
+ * @brief Get the current audio output power level (normalized 0.0-1.0)
+ * @return float - Current audio power level
+ */
+float ai_audio_player_get_power(void);
 
 #ifdef __cplusplus
 }

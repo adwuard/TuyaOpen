@@ -62,6 +62,14 @@ typedef struct {
 
 typedef void (*AI_AUDIO_INOUT_INFORM_CB)(AI_AUDIO_INPUT_EVENT_E event, void *arg);
 
+/**
+ * @brief Callback type for audio input data
+ * @param data Pointer to audio input data (PCM samples)
+ * @param len Length of audio data in bytes
+ * @param user_data User-provided context
+ */
+typedef void (*AI_AUDIO_INPUT_DATA_CB)(uint8_t *data, uint32_t len, void *user_data);
+
 /***********************************************************
 ********************function declaration********************
 ***********************************************************/
@@ -86,6 +94,26 @@ uint32_t ai_audio_get_input_data(uint8_t *buff, uint32_t buff_len);
 uint32_t ai_audio_get_input_data_size(void);
 
 void ai_audio_discard_input_data(uint32_t discard_size);
+
+/**
+ * @brief Register a callback for audio input data
+ * @param cb Callback function to receive audio input data
+ * @param user_data User-provided context passed to callback
+ * @return OPERATE_RET - OPRT_OK on success
+ */
+OPERATE_RET ai_audio_input_register_data_cb(AI_AUDIO_INPUT_DATA_CB cb, void *user_data);
+
+/**
+ * @brief Unregister the audio input data callback
+ * @return OPERATE_RET - OPRT_OK on success
+ */
+OPERATE_RET ai_audio_input_unregister_data_cb(void);
+
+/**
+ * @brief Get the current audio input power level (normalized 0.0-1.0)
+ * @return float - Current audio power level
+ */
+float ai_audio_input_get_power(void);
 
 #ifdef __cplusplus
 }

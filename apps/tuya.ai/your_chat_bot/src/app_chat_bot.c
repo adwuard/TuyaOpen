@@ -24,6 +24,10 @@
 #include "ai_audio.h"
 #include "app_chat_bot.h"
 #include "media_src_zh.h"
+// #include "sphere_effect_integration.h"
+
+extern void sphere_effect_integration_update_state(AI_AUDIO_STATE_E state);
+extern void sphere_effect_integration_init(void);
 /***********************************************************
 ************************macro define************************
 ***********************************************************/
@@ -258,6 +262,11 @@ static void __app_ai_audio_state_inform_cb(AI_AUDIO_STATE_E state)
 {
 
     PR_DEBUG("ai audio state: %d", state);
+
+    // Update sphere effect state based on AI audio state
+#if defined(ENABLE_SPI) && (ENABLE_SPI) && defined(ENABLE_LEDS_PIXEL) && (ENABLE_LEDS_PIXEL)
+    sphere_effect_integration_update_state(state);
+#endif
 
     switch (state) {
     case AI_AUDIO_STATE_STANDBY:
@@ -518,6 +527,11 @@ OPERATE_RET app_chat_bot_init(void)
 
 #if defined(ENABLE_CHAT_DISPLAY) && (ENABLE_CHAT_DISPLAY == 1)
     app_display_init();
+#endif
+
+    // Initialize sphere effect integration
+#if defined(ENABLE_SPI) && (ENABLE_SPI) && defined(ENABLE_LEDS_PIXEL) && (ENABLE_LEDS_PIXEL)
+    sphere_effect_integration_init();
 #endif
 
     ai_audio_cfg.work_mode = sg_chat_bot.work->auido_mode;
